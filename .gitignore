@@ -1,0 +1,10 @@
+node_modules/
+.firebase/
+*.log
+
+# Fichiers réservés aux organisateurs (réponses, dossier de reprise, prototypes) :
+# ce dépôt est public, ils ne doivent jamais y être ajoutés.
+/tools/
+/docs/
+/prototypes/
+contenu-*.json

@@ -1,0 +1,104 @@
+rules_version = '2';
+
+// CENTRAL — règles de sécurité Firestore
+// Les réponses, la clé d'accès, les indices non révélés et les fragments non gagnés
+// ne sont jamais lisibles par les joueurs : c'est le serveur qui vérifie.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function isAdmin() {
+      return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+    function cfg() { return get(/databases/$(database)/documents/config/public).data; }
+    function isPlayer() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/players/$(request.auth.uid))
+        && get(/databases/$(database)/documents/players/$(request.auth.uid)).data.epoch == cfg().epoch;
+    }
+    function member() { return isPlayer() || isAdmin(); }
+    function h(s) { return hashing.sha256(s).toHexString().lower(); }
+    function isOpen(m) {
+      return m.get('locked', false) == false
+        && (m.get('openAt', null) == null || request.time >= m.openAt);
+    }
+    function shortStr(v, n) { return v is string && v.size() <= n; }
+
+    // Réglages publics (époque de la clé d'accès)
+    match /config/public {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // Les admins sont ajoutés à la main dans la console Firebase
+    match /admins/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    // Empreinte de la clé d'accès partagée
+    match /secrets/{docId} {
+      allow read: if false;
+      allow write: if isAdmin();
+    }
+
+    // Empreintes des réponses acceptées : { hashes: [ ... ] }
+    match /answers/{id} {
+      allow read: if isAdmin();
+      allow write: if isAdmin();
+    }
+
+    // Joueurs : la clé saisie est vérifiée ici, à l'écriture
+    match /players/{uid} {
+      allow read: if (signedIn() && request.auth.uid == uid) || isAdmin();
+      allow create, update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['code', 'epoch', 'name', 'at'])
+        && shortStr(request.resource.data.code, 32)
+        && shortStr(request.resource.data.name, 24)
+        && request.resource.data.epoch == cfg().epoch
+        && request.resource.data.at == request.time
+        && h(request.resource.data.code) == get(/databases/$(database)/documents/secrets/access).data.hash;
+      allow delete: if isAdmin();
+    }
+
+    // Missions : textes publics pour les membres
+    match /missions/{id} {
+      allow read: if member();
+      allow write: if isAdmin();
+      // Un joueur peut seulement révéler l'indice suivant
+      allow update: if isPlayer() && isOpen(resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['hintsShown'])
+        && request.resource.data.hintsShown == resource.data.hintsShown + 1
+        && request.resource.data.hintsShown <= resource.data.hintCount;
+
+      match /hints/{n} {
+        allow read: if isAdmin()
+          || (isPlayer() && int(n) < get(/databases/$(database)/documents/missions/$(id)).data.hintsShown);
+        allow write: if isAdmin();
+      }
+    }
+
+    // Fragments du texte final : lisibles seulement une fois le secteur restauré
+    match /fragments/{id} {
+      allow read: if isAdmin()
+        || (member() && exists(/databases/$(database)/documents/progress/$(id)));
+      allow write: if isAdmin();
+    }
+
+    // Progression collective : un secteur ne se valide qu'une fois, avec la bonne réponse
+    match /progress/{id} {
+      allow read: if member();
+      allow create: if isAdmin() || (isPlayer()
+        && request.resource.data.keys().hasOnly(['answer', 'at', 'by', 'name'])
+        && shortStr(request.resource.data.answer, 32)
+        && shortStr(request.resource.data.name, 24)
+        && request.resource.data.at == request.time
+        && request.resource.data.by == request.auth.uid
+        && isOpen(get(/databases/$(database)/documents/missions/$(id)).data)
+        && h(request.resource.data.answer) in get(/databases/$(database)/documents/answers/$(id)).data.hashes);
+      allow update: if false;
+      allow delete: if isAdmin();
+    }
+  }
+}
